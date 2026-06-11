@@ -1,137 +1,240 @@
 const { Telegraf, Markup } = require('telegraf');
 const db = require('./db');
+const footballApi = require('./api');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
-
+const CHAT_ID = process.env.CHAT_ID; // ID группового чата для ежедневных уведомлений
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(id => parseInt(id.trim())).filter(Boolean);
 
 function isAdmin(ctx) {
   return ADMIN_IDS.length === 0 || ADMIN_IDS.includes(ctx.from.id);
 }
 
-// /start
+function formatDate(dateStr) {
+  const d = new Date(dateStr);
+  return d.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) + ' МСК';
+}
+
+function getWinner(homeScore, awayScore) {
+  if (homeScore > awayScore) return 'HOME';
+  if (homeScore < awayScore) return 'AWAY';
+  return 'DRAW';
+}
+
+// =====================
+// SYNC матчей из API
+// =====================
+async function syncMatches() {
+  try {
+    const data = await footballApi.getWCMatches();
+    if (!data.matches) {
+      console.error('No matches in API response:', JSON.stringify(data).slice(0, 200));
+      return 0;
+    }
+    for (const m of data.matches) {
+      const parsed = footballApi.parseMatch(m);
+      await db.upsertMatch(parsed);
+
+      // Если матч завершён — начислить очки
+      if (parsed.status === 'FINISHED' && parsed.home_score !== null) {
+        const winner = getWinner(parsed.home_score, parsed.away_score);
+        await db.awardPoints(parsed.id, winner);
+      }
+    }
+    console.log(`Synced ${data.matches.length} matches`);
+    return data.matches.length;
+  } catch (e) {
+    console.error('Sync error:', e.message);
+    return 0;
+  }
+}
+
+// =====================
+// КОМАНДЫ БОТА
+// =====================
+
 bot.start((ctx) => {
   ctx.reply(
-    '⚽ *Бот ЧМ 2026*\n\n' +
-    'Команды:\n' +
-    '/result — добавить результат матча\n' +
-    '/results — все результаты\n' +
-    '/standings — таблица групп\n' +
-    '/myid — узнать свой Telegram ID',
+    '⚽ *Прогнозист ЧМ 2026*\n\n' +
+    'Делай прогнозы на матчи и соревнуйся с друзьями!\n\n' +
+    '*Команды:*\n' +
+    '/today — матчи сегодня\n' +
+    '/upcoming — ближайшие матчи\n' +
+    '/predict — сделать прогноз\n' +
+    '/leaderboard — таблица прогнозистов\n' +
+    '/results — результаты матчей\n' +
+    '/myid — узнать свой ID',
     { parse_mode: 'Markdown' }
   );
 });
 
-// /myid — для получения своего ID (чтобы прописать в ADMIN_IDS)
 bot.command('myid', (ctx) => {
   ctx.reply(`Твой Telegram ID: \`${ctx.from.id}\``, { parse_mode: 'Markdown' });
 });
 
-// /result Бразилия 2 Германия 1
-bot.command('result', async (ctx) => {
-  if (!isAdmin(ctx)) return ctx.reply('⛔ Нет доступа.');
+// Матчи сегодня
+bot.command('today', async (ctx) => {
+  const matches = await db.getTodayMatches();
+  if (!matches.length) return ctx.reply('Сегодня матчей нет.');
 
-  const args = ctx.message.text.split(' ').slice(1);
-  // Формат: /result Команда1 Счёт1 Команда2 Счёт2 [Группа]
-  // Пример: /result Бразилия 2 Германия 1 A
-  if (args.length < 4) {
-    return ctx.reply(
-      'Формат: `/result Команда1 Счёт1 Команда2 Счёт2 [Группа]`\n' +
-      'Пример: `/result Бразилия 2 Германия 1 A`',
-      { parse_mode: 'Markdown' }
-    );
-  }
-
-  const team1 = args[0];
-  const score1 = parseInt(args[1]);
-  const team2 = args[2];
-  const score2 = parseInt(args[3]);
-  const group = args[4] ? args[4].toUpperCase() : null;
-
-  if (isNaN(score1) || isNaN(score2)) {
-    return ctx.reply('❌ Счёт должен быть числом.');
-  }
-
-  await db.addResult({ team1, score1, team2, score2, group });
-  ctx.reply(`✅ Добавлено: *${team1} ${score1} — ${score2} ${team2}*${group ? ` (Группа ${group})` : ''}`, { parse_mode: 'Markdown' });
-});
-
-// /results — все результаты
-bot.command('results', async (ctx) => {
-  const results = await db.getResults();
-  if (!results.length) return ctx.reply('Результатов пока нет.');
-
-  const lines = results.map(r => {
-    const group = r.group_name ? ` [${r.group_name}]` : '';
-    const date = new Date(r.played_at).toLocaleDateString('ru-RU');
-    return `${date}${group} *${r.team1}* ${r.score1}–${r.score2} *${r.team2}*`;
-  });
-
-  ctx.reply('📋 *Результаты матчей:*\n\n' + lines.join('\n'), { parse_mode: 'Markdown' });
-});
-
-// /standings — таблица по группам
-bot.command('standings', async (ctx) => {
-  const results = await db.getResults();
-  const grouped = results.filter(r => r.group_name);
-
-  if (!grouped.length) return ctx.reply('Нет матчей с указанными группами.');
-
-  const groups = {};
-  for (const r of grouped) {
-    const g = r.group_name;
-    if (!groups[g]) groups[g] = {};
-
-    const ensureTeam = (team) => {
-      if (!groups[g][team]) groups[g][team] = { w: 0, d: 0, l: 0, gf: 0, ga: 0, pts: 0 };
-    };
-
-    ensureTeam(r.team1);
-    ensureTeam(r.team2);
-
-    groups[g][r.team1].gf += r.score1;
-    groups[g][r.team1].ga += r.score2;
-    groups[g][r.team2].gf += r.score2;
-    groups[g][r.team2].ga += r.score1;
-
-    if (r.score1 > r.score2) {
-      groups[g][r.team1].w++; groups[g][r.team1].pts += 3;
-      groups[g][r.team2].l++;
-    } else if (r.score1 < r.score2) {
-      groups[g][r.team2].w++; groups[g][r.team2].pts += 3;
-      groups[g][r.team1].l++;
+  let msg = '📅 *Матчи сегодня:*\n\n';
+  for (const m of matches) {
+    const group = m.group_name ? ` [Группа ${m.group_name}]` : '';
+    if (m.status === 'FINISHED') {
+      msg += `✅${group} *${m.home_team}* ${m.home_score}–${m.away_score} *${m.away_team}*\n`;
     } else {
-      groups[g][r.team1].d++; groups[g][r.team1].pts++;
-      groups[g][r.team2].d++; groups[g][r.team2].pts++;
+      msg += `🕐 ${formatDate(m.match_date)}${group}\n*${m.home_team}* vs *${m.away_team}*\n`;
     }
+    msg += '\n';
   }
-
-  let msg = '📊 *Таблица групп:*\n';
-  for (const [gName, teams] of Object.entries(groups).sort()) {
-    msg += `\n*Группа ${gName}*\n`;
-    const sorted = Object.entries(teams).sort((a, b) => b[1].pts - a[1].pts || (b[1].gf - b[1].ga) - (a[1].gf - a[1].ga));
-    for (const [team, s] of sorted) {
-      const gd = s.gf - s.ga;
-      msg += `${team}: ${s.pts} очк. | ${s.w}В ${s.d}Н ${s.l}П | ${s.gf}:${s.ga} (${gd >= 0 ? '+' : ''}${gd})\n`;
-    }
-  }
-
   ctx.reply(msg, { parse_mode: 'Markdown' });
 });
 
-// /delete_result — удалить последний результат
-bot.command('delete_result', async (ctx) => {
-  if (!isAdmin(ctx)) return ctx.reply('⛔ Нет доступа.');
-  const deleted = await db.deleteLastResult();
-  if (deleted) {
-    ctx.reply(`🗑 Удалён: *${deleted.team1} ${deleted.score1}–${deleted.score2} ${deleted.team2}*`, { parse_mode: 'Markdown' });
-  } else {
-    ctx.reply('Нет результатов для удаления.');
+// Ближайшие матчи
+bot.command('upcoming', async (ctx) => {
+  const matches = await db.getUpcomingMatches(8);
+  if (!matches.length) return ctx.reply('Нет запланированных матчей.');
+
+  let msg = '📅 *Ближайшие матчи:*\n\n';
+  for (const m of matches) {
+    const group = m.group_name ? ` [Группа ${m.group_name}]` : '';
+    msg += `${formatDate(m.match_date)}${group}\n*${m.home_team}* vs *${m.away_team}*\n\n`;
+  }
+  ctx.reply(msg, { parse_mode: 'Markdown' });
+});
+
+// Результаты завершённых матчей
+bot.command('results', async (ctx) => {
+  const matches = await db.getFinishedMatches();
+  if (!matches.length) return ctx.reply('Завершённых матчей пока нет.');
+
+  let msg = '📋 *Результаты:*\n\n';
+  for (const m of matches.slice(0, 20)) {
+    const group = m.group_name ? ` [${m.group_name}]` : '';
+    msg += `${group} *${m.home_team}* ${m.home_score}–${m.away_score} *${m.away_team}*\n`;
+  }
+  ctx.reply(msg, { parse_mode: 'Markdown' });
+});
+
+// Таблица прогнозистов
+bot.command('leaderboard', async (ctx) => {
+  const rows = await db.getLeaderboard();
+  if (!rows.length) return ctx.reply('Прогнозов пока нет.');
+
+  const medals = ['🥇', '🥈', '🥉'];
+  let msg = '🏆 *Таблица прогнозистов:*\n\n';
+  rows.forEach((r, i) => {
+    const medal = medals[i] || `${i + 1}.`;
+    msg += `${medal} *${r.username || 'Аноним'}* — ${r.total_points} очков (${r.correct}/${r.total_predictions} угаданных)\n`;
+  });
+  ctx.reply(msg, { parse_mode: 'Markdown' });
+});
+
+// Сделать прогноз — показывает ближайшие матчи с кнопками
+bot.command('predict', async (ctx) => {
+  const matches = await db.getUpcomingMatches(5);
+  if (!matches.length) return ctx.reply('Нет доступных матчей для прогноза.');
+
+  for (const m of matches) {
+    const existing = await db.getUserPrediction(m.id, ctx.from.id);
+    const existingText = existing ? `\n✏️ Твой прогноз: *${predictionLabel(existing.prediction, m)}*` : '';
+
+    await ctx.reply(
+      `⚽ *${m.home_team}* vs *${m.away_team}*\n📅 ${formatDate(m.match_date)}${existingText}\n\nТвой прогноз:`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          Markup.button.callback(`🏆 ${m.home_team}`, `pred_${m.id}_HOME`),
+          Markup.button.callback('🤝 Ничья', `pred_${m.id}_DRAW`),
+          Markup.button.callback(`🏆 ${m.away_team}`, `pred_${m.id}_AWAY`),
+        ])
+      }
+    );
   }
 });
 
-bot.launch();
-console.log('Bot started');
+function predictionLabel(prediction, match) {
+  if (prediction === 'HOME') return match.home_team;
+  if (prediction === 'AWAY') return match.away_team;
+  return 'Ничья';
+}
+
+// Обработка нажатий на кнопки прогноза
+bot.action(/^pred_(\d+)_(HOME|DRAW|AWAY)$/, async (ctx) => {
+  const matchId = parseInt(ctx.match[1]);
+  const prediction = ctx.match[2];
+
+  const match = await db.getMatchById(matchId);
+  if (!match) return ctx.answerCbQuery('Матч не найден.');
+  if (match.status !== 'SCHEDULED') return ctx.answerCbQuery('⛔ Прогнозы на этот матч уже закрыты.');
+
+  const username = ctx.from.username || ctx.from.first_name || 'Аноним';
+  await db.savePrediction(matchId, ctx.from.id, username, prediction);
+
+  const label = predictionLabel(prediction, match);
+  await ctx.answerCbQuery(`✅ Прогноз принят: ${label}`);
+  await ctx.editMessageReplyMarkup(
+    Markup.inlineKeyboard([
+      Markup.button.callback(`🏆 ${match.home_team}`, `pred_${matchId}_HOME`),
+      Markup.button.callback('🤝 Ничья', `pred_${matchId}_DRAW`),
+      Markup.button.callback(`🏆 ${match.away_team}`, `pred_${matchId}_AWAY`),
+    ]).reply_markup
+  );
+});
+
+// Синхронизация (только для админа)
+bot.command('sync', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply('⛔ Нет доступа.');
+  ctx.reply('🔄 Синхронизирую матчи...');
+  const count = await syncMatches();
+  ctx.reply(`✅ Синхронизировано ${count} матчей.`);
+});
+
+// =====================
+// ЕЖЕДНЕВНОЕ УВЕДОМЛЕНИЕ
+// =====================
+async function sendDailySchedule() {
+  if (!CHAT_ID) return;
+  const matches = await db.getTodayMatches();
+  if (!matches.length) return;
+
+  let msg = '📅 *Матчи сегодня — делайте прогнозы!*\n\n';
+  for (const m of matches) {
+    const group = m.group_name ? ` [Группа ${m.group_name}]` : '';
+    msg += `🕐 ${formatDate(m.match_date)}${group}\n*${m.home_team}* vs *${m.away_team}*\n\n`;
+  }
+  msg += 'Используй /predict чтобы сделать прогноз!';
+
+  await bot.telegram.sendMessage(CHAT_ID, msg, { parse_mode: 'Markdown' });
+}
+
+// =====================
+// ПЛАНИРОВЩИК
+// =====================
+function startScheduler() {
+  // Синхронизация каждые 5 минут
+  setInterval(syncMatches, 5 * 60 * 1000);
+
+  // Ежедневное уведомление в 9:00 МСК
+  setInterval(async () => {
+    const now = new Date();
+    const moscowHour = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/Moscow' })).getHours();
+    const moscowMin = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/Moscow' })).getMinutes();
+    if (moscowHour === 9 && moscowMin < 1) {
+      await sendDailySchedule();
+    }
+  }, 60 * 1000); // проверяем каждую минуту
+}
+
+// =====================
+// СТАРТ
+// =====================
+(async () => {
+  await syncMatches(); // начальная синхронизация
+  startScheduler();
+  bot.launch();
+  console.log('Bot started');
+})();
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
