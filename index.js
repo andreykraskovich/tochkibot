@@ -201,13 +201,18 @@ bot.action(/^pred_(\d+)_(HOME|DRAW|AWAY)$/, async (ctx) => {
 
   const label = predictionLabel(prediction, match);
   await ctx.answerCbQuery(`✅ Прогноз принят: ${label}`);
-  await ctx.editMessageReplyMarkup(
-    Markup.inlineKeyboard([
-      Markup.button.callback(`🏆 ${match.home_team}`, `pred_${matchId}_HOME`),
-      Markup.button.callback('🤝 Ничья', `pred_${matchId}_DRAW`),
-      Markup.button.callback(`🏆 ${match.away_team}`, `pred_${matchId}_AWAY`),
-    ]).reply_markup
-  );
+
+  try {
+    await ctx.editMessageReplyMarkup(
+      Markup.inlineKeyboard([
+        Markup.button.callback(`${prediction === 'HOME' ? '✅' : '🏆'} ${match.home_team}`, `pred_${matchId}_HOME`),
+        Markup.button.callback(prediction === 'DRAW' ? '✅ Ничья' : '🤝 Ничья', `pred_${matchId}_DRAW`),
+        Markup.button.callback(`${prediction === 'AWAY' ? '✅' : '🏆'} ${match.away_team}`, `pred_${matchId}_AWAY`),
+      ]).reply_markup
+    );
+  } catch (e) {
+    // Telegram throws if markup didn't change — ignore
+  }
 });
 
 // Синхронизация (только для админа)
