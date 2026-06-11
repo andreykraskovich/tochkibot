@@ -73,7 +73,7 @@ async function getTodayMatches() {
 async function getUpcomingMatches(limit = 5) {
   const { rows } = await pool.query(`
     SELECT * FROM matches
-    WHERE status = 'SCHEDULED' AND match_date > NOW()
+    WHERE status IN ('SCHEDULED', 'TIMED') AND match_date > NOW() - INTERVAL '30 minutes'
     ORDER BY match_date ASC
     LIMIT $1
   `, [limit]);

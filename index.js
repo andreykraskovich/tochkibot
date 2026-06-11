@@ -194,7 +194,7 @@ bot.action(/^pred_(\d+)_(HOME|DRAW|AWAY)$/, async (ctx) => {
 
   const match = await db.getMatchById(matchId);
   if (!match) return ctx.answerCbQuery('Матч не найден.');
-  if (match.status !== 'SCHEDULED') return ctx.answerCbQuery('⛔ Прогнозы на этот матч уже закрыты.');
+  if (['FINISHED', 'IN_PLAY', 'PAUSED', 'SUSPENDED'].includes(match.status)) return ctx.answerCbQuery('⛔ Прогнозы на этот матч уже закрыты.');
 
   const username = ctx.from.username || ctx.from.first_name || 'Аноним';
   await db.savePrediction(matchId, ctx.from.id, username, prediction);
