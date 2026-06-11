@@ -106,6 +106,17 @@ async function getPredictionsForMatch(matchId) {
   return rows;
 }
 
+async function getUserPredictions(userId) {
+  const { rows } = await pool.query(`
+    SELECT p.*, m.home_team, m.away_team, m.home_score, m.away_score, m.status
+    FROM predictions p
+    JOIN matches m ON m.id = p.match_id
+    WHERE p.user_id = $1
+    ORDER BY m.match_date DESC
+  `, [userId]);
+  return rows;
+}
+
 async function getUserPrediction(matchId, userId) {
   const { rows } = await pool.query(
     'SELECT * FROM predictions WHERE match_id = $1 AND user_id = $2',
@@ -148,6 +159,6 @@ init().catch(console.error);
 
 module.exports = {
   upsertMatch, getMatchById, getTodayMatches, getUpcomingMatches, getFinishedMatches,
-  savePrediction, getPredictionsForMatch, getUserPrediction, awardPoints, getLeaderboard,
+  savePrediction, getPredictionsForMatch, getUserPrediction, getUserPredictions, awardPoints, getLeaderboard,
   isMatchNotified, markMatchNotified
 };

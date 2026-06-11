@@ -62,6 +62,7 @@ bot.start((ctx) => {
     '/upcoming — ближайшие матчи\n' +
     '/predict — сделать прогноз\n' +
     '/leaderboard — таблица прогнозистов\n' +
+    '/mypredicts — мои прогнозы\n' +
     '/results — результаты матчей\n' +
     '/myid — узнать свой ID',
     { parse_mode: 'Markdown' }
@@ -113,6 +114,33 @@ bot.command('results', async (ctx) => {
     const group = m.group_name ? ` [${m.group_name}]` : '';
     msg += `${group} *${m.home_team}* ${m.home_score}–${m.away_score} *${m.away_team}*\n`;
   }
+  ctx.reply(msg, { parse_mode: 'Markdown' });
+});
+
+// Мои прогнозы
+bot.command('mypredicts', async (ctx) => {
+  const rows = await db.getUserPredictions(ctx.from.id);
+  if (!rows.length) return ctx.reply('У тебя пока нет прогнозов. Используй /predict!');
+
+  let msg = `📝 *Твои прогнозы, ${ctx.from.first_name}:*\n\n`;
+  for (const r of rows) {
+    const label = r.prediction === 'HOME' ? r.home_team : r.prediction === 'AWAY' ? r.away_team : 'Ничья';
+    let statusIcon = '⏳';
+    let result = '';
+    if (r.status === 'FINISHED') {
+      statusIcon = r.points > 0 ? '✅' : '❌';
+      result = ` (${r.home_score}–${r.away_score})`;
+    }
+    msg += `${statusIcon} *${r.home_team}* vs *${r.away_team}*${result}\n`;
+    msg += `   Прогноз: ${label}`;
+    if (r.status === 'FINISHED') msg += ` · ${r.points > 0 ? '+3 очка' : '0 очков'}`;
+    msg += '\n\n';
+  }
+
+  const total = rows.reduce((sum, r) => sum + (r.points || 0), 0);
+  const correct = rows.filter(r => r.points > 0).length;
+  msg += `Итого: *${total} очков* (${correct}/${rows.length} угаданных)`;
+
   ctx.reply(msg, { parse_mode: 'Markdown' });
 });
 
