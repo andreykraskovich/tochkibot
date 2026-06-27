@@ -21,12 +21,51 @@ function getWinner(homeScore, awayScore) {
   return 'DRAW';
 }
 
+// Человекочитаемые названия этапов плей-офф
+const STAGE_NAMES = {
+  LEAGUE_STAGE: null,            // новый формат — считается как групповой этап
+  GROUP_STAGE: null,
+  LAST_32: '1/16 финала',
+  LAST_16: '1/8 финала',
+  ROUND_OF_16: '1/8 финала',
+  QUARTER_FINALS: '1/4 финала',
+  SEMI_FINALS: '1/2 финала',
+  THIRD_PLACE: 'Матч за 3-е место',
+  FINAL: 'Финал',
+};
+
+// Плей-офф — всё, что не групповой/лиговый этап
+function isPlayoff(m) {
+  return !!m.stage && m.stage !== 'GROUP_STAGE' && m.stage !== 'LEAGUE_STAGE';
+}
+
+// Подпись матча: группа для группового этапа, название раунда для плей-офф
+function matchTag(m) {
+  if (m.group_name) return ` [Группа ${m.group_name}]`;
+  if (isPlayoff(m)) return ` [${STAGE_NAMES[m.stage] || 'Плей-офф'}]`;
+  return '';
+}
+
+// Пометка к счёту, если матч вышел за пределы основного времени.
+// Счёт у нас хранится по основному времени (см. parseMatch), поэтому, например,
+// «1–1 (пен.)» означает «в основное время 1–1, дальше серия пенальти».
+function resultSuffix(m) {
+  if (m.duration === 'EXTRA_TIME') return ' (д.в.)';
+  if (m.duration === 'PENALTY_SHOOTOUT') return ' (пен.)';
+  return '';
+}
+
+// Очки начисляются по исходу ОСНОВНОГО времени: home_score/away_score уже хранят
+// счёт 90 минут (в плей-офф regularTime), так что в плей-офф ничья в основное время
+// даёт исход DRAW, даже если затем были доп.время/пенальти.
+
 // =====================
 // SYNC матчей из API
 // =====================
 async function syncMatches() {
   try {
-    const data = await footballApi.getWCMatches();
+    // Тянем все матчи турнира — и групповой этап, и плей-офф
+    const data = await footballApi.getWCMatchesAll();
     if (!data.matches) {
       console.error('No matches in API response:', JSON.stringify(data).slice(0, 200));
       return 0;
@@ -35,7 +74,7 @@ async function syncMatches() {
       const parsed = footballApi.parseMatch(m);
       await db.upsertMatch(parsed);
 
-      // Если матч завершён — начислить очки
+      // Если матч завершён — начислить очки (по исходу основного времени)
       if (parsed.status === 'FINISHED' && parsed.home_score !== null) {
         const winner = getWinner(parsed.home_score, parsed.away_score);
         await db.awardPoints(parsed.id, winner);
@@ -80,11 +119,11 @@ bot.command('today', async (ctx) => {
 
   let msg = '📅 *Матчи сегодня:*\n\n';
   for (const m of matches) {
-    const group = m.group_name ? ` [Группа ${m.group_name}]` : '';
+    const tag = matchTag(m);
     if (m.status === 'FINISHED') {
-      msg += `✅${group} *${m.home_team}* ${m.home_score}–${m.away_score} *${m.away_team}*\n`;
+      msg += `✅${tag} *${m.home_team}* ${m.home_score}–${m.away_score}${resultSuffix(m)} *${m.away_team}*\n`;
     } else {
-      msg += `🕐 ${formatDate(m.match_date)}${group}\n*${m.home_team}* vs *${m.away_team}*\n`;
+      msg += `🕐 ${formatDate(m.match_date)}${tag}\n*${m.home_team}* vs *${m.away_team}*\n`;
     }
     msg += '\n';
   }
@@ -98,8 +137,8 @@ bot.command('upcoming', async (ctx) => {
 
   let msg = '📅 *Ближайшие матчи:*\n\n';
   for (const m of matches) {
-    const group = m.group_name ? ` [Группа ${m.group_name}]` : '';
-    msg += `${formatDate(m.match_date)}${group}\n*${m.home_team}* vs *${m.away_team}*\n\n`;
+    const tag = matchTag(m);
+    msg += `${formatDate(m.match_date)}${tag}\n*${m.home_team}* vs *${m.away_team}*\n\n`;
   }
   ctx.reply(msg, { parse_mode: 'Markdown' });
 });
@@ -111,8 +150,8 @@ bot.command('results', async (ctx) => {
 
   let msg = '📋 *Результаты:*\n\n';
   for (const m of matches.slice(0, 20)) {
-    const group = m.group_name ? ` [${m.group_name}]` : '';
-    msg += `${group} *${m.home_team}* ${m.home_score}–${m.away_score} *${m.away_team}*\n`;
+    const tag = matchTag(m);
+    msg += `${tag} *${m.home_team}* ${m.home_score}–${m.away_score}${resultSuffix(m)} *${m.away_team}*\n`;
   }
   ctx.reply(msg, { parse_mode: 'Markdown' });
 });
@@ -129,7 +168,7 @@ bot.command('mypredicts', async (ctx) => {
     let result = '';
     if (r.status === 'FINISHED') {
       statusIcon = r.points > 0 ? '✅' : '❌';
-      result = ` (${r.home_score}–${r.away_score})`;
+      result = ` (${r.home_score}–${r.away_score}${resultSuffix(r)})`;
     }
     msg += `${statusIcon} *${r.home_team}* vs *${r.away_team}*${result}\n`;
     msg += `   Прогноз: ${label}`;
@@ -166,14 +205,17 @@ bot.command('predict', async (ctx) => {
   for (const m of matches) {
     const existing = await db.getUserPrediction(m.id, ctx.from.id);
     const existingText = existing ? `\n✏️ Твой прогноз: *${predictionLabel(existing.prediction, m)}*` : '';
+    const playoff = isPlayoff(m);
+    const playoffHint = playoff ? '\nℹ️ Плей-офф: «Ничья» — если в основное время (90 мин) ничья.' : '';
+    const drawLabel = playoff ? '🤝 Ничья (осн.)' : '🤝 Ничья';
 
     await ctx.reply(
-      `⚽ *${m.home_team}* vs *${m.away_team}*\n📅 ${formatDate(m.match_date)}${existingText}\n\nТвой прогноз:`,
+      `⚽ *${m.home_team}* vs *${m.away_team}*\n📅 ${formatDate(m.match_date)}${matchTag(m)}${existingText}${playoffHint}\n\nТвой прогноз:`,
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
           Markup.button.callback(`🏆 ${m.home_team}`, `pred_${m.id}_HOME`),
-          Markup.button.callback('🤝 Ничья', `pred_${m.id}_DRAW`),
+          Markup.button.callback(drawLabel, `pred_${m.id}_DRAW`),
           Markup.button.callback(`🏆 ${m.away_team}`, `pred_${m.id}_AWAY`),
         ])
       }
@@ -233,8 +275,8 @@ async function sendDailySchedule() {
 
   let msg = '📅 *Матчи сегодня — делайте прогнозы!*\n\n';
   for (const m of matches) {
-    const group = m.group_name ? ` [Группа ${m.group_name}]` : '';
-    msg += `🕐 ${formatDate(m.match_date)}${group}\n*${m.home_team}* vs *${m.away_team}*\n\n`;
+    const tag = matchTag(m);
+    msg += `🕐 ${formatDate(m.match_date)}${tag}\n*${m.home_team}* vs *${m.away_team}*\n\n`;
   }
   msg += 'Используй /predict чтобы сделать прогноз!';
 
@@ -250,14 +292,35 @@ function startScheduler() {
 
   // Ежедневное уведомление в 9:00 МСК
   setInterval(async () => {
-    const now = new Date();
-    const moscowHour = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/Moscow' })).getHours();
-    const moscowMin = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/Moscow' })).getMinutes();
-    if (moscowHour === 9 && moscowMin < 1) {
-      await sendDailySchedule();
+    try {
+      const now = new Date();
+      const moscowHour = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/Moscow' })).getHours();
+      const moscowMin = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/Moscow' })).getMinutes();
+      if (moscowHour === 9 && moscowMin < 1) {
+        await sendDailySchedule();
+      }
+    } catch (e) {
+      console.error('Daily schedule error:', e.message);
     }
   }, 60 * 1000); // проверяем каждую минуту
 }
+
+// =====================
+// ГЛОБАЛЬНАЯ ОБРАБОТКА ОШИБОК
+// =====================
+// Ловим любые ошибки внутри хендлеров бота (например, 429 от Telegram),
+// чтобы они НЕ роняли процесс. Раньше из-за этого бот падал и не поднимался.
+bot.catch((err, ctx) => {
+  console.error(`Bot handler error (update ${ctx?.updateType}):`, err?.message || err);
+});
+
+// Сеть подстраховки: не даём упасть процессу из-за «потерянных» ошибок.
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason?.message || reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err?.message || err);
+});
 
 // =====================
 // СТАРТ
@@ -265,7 +328,9 @@ function startScheduler() {
 (async () => {
   await syncMatches(); // начальная синхронизация
   startScheduler();
-  bot.launch();
+  bot.launch()
+    .then(() => console.log('Bot launched'))
+    .catch((e) => console.error('Bot launch error:', e?.message || e));
   console.log('Bot started');
 })();
 

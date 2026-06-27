@@ -16,9 +16,15 @@ async function init() {
       status VARCHAR(50) DEFAULT 'SCHEDULED',
       match_date TIMESTAMP NOT NULL,
       group_name VARCHAR(10),
+      stage VARCHAR(30),
+      duration VARCHAR(20),
       updated_at TIMESTAMP DEFAULT NOW()
     )
   `);
+
+  // Миграция для уже существующей базы, где новых колонок ещё нет
+  await pool.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS stage VARCHAR(30)`);
+  await pool.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS duration VARCHAR(20)`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS predictions (
@@ -46,14 +52,16 @@ async function init() {
 // Matches
 async function upsertMatch(match) {
   await pool.query(`
-    INSERT INTO matches (id, home_team, away_team, home_score, away_score, status, match_date, group_name, updated_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+    INSERT INTO matches (id, home_team, away_team, home_score, away_score, status, match_date, group_name, stage, duration, updated_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
     ON CONFLICT (id) DO UPDATE SET
       home_score = EXCLUDED.home_score,
       away_score = EXCLUDED.away_score,
       status = EXCLUDED.status,
+      stage = EXCLUDED.stage,
+      duration = EXCLUDED.duration,
       updated_at = NOW()
-  `, [match.id, match.home_team, match.away_team, match.home_score, match.away_score, match.status, match.match_date, match.group_name]);
+  `, [match.id, match.home_team, match.away_team, match.home_score, match.away_score, match.status, match.match_date, match.group_name, match.stage, match.duration]);
 }
 
 async function getMatchById(id) {
@@ -108,7 +116,7 @@ async function getPredictionsForMatch(matchId) {
 
 async function getUserPredictions(userId) {
   const { rows } = await pool.query(`
-    SELECT p.*, m.home_team, m.away_team, m.home_score, m.away_score, m.status
+    SELECT p.*, m.home_team, m.away_team, m.home_score, m.away_score, m.status, m.duration, m.stage
     FROM predictions p
     JOIN matches m ON m.id = p.match_id
     WHERE p.user_id = $1

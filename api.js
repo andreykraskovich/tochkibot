@@ -49,16 +49,27 @@ async function getMatch(matchId) {
 }
 
 function parseMatch(m) {
-  const score = m.score?.fullTime;
+  const ft = m.score?.fullTime;
+  // regularTime — счёт за 90 минут (основное время). API отдаёт его только когда
+  // матч вышел за пределы 90 мин (плей-офф с доп.временем/пенальти). В этом случае
+  // fullTime содержит итог С доп.временем (а для пенальти — вообще счёт серии пенальти),
+  // поэтому для нашей логики «по основному времени» берём именно regularTime.
+  // Для группового этапа и плей-офф, решённого в основное время, regularTime нет —
+  // тогда fullTime и есть счёт 90 минут.
+  const reg = m.score?.regularTime;
   return {
     id: m.id,
     home_team: m.homeTeam?.shortName || m.homeTeam?.name || 'TBD',
     away_team: m.awayTeam?.shortName || m.awayTeam?.name || 'TBD',
-    home_score: score?.home ?? null,
-    away_score: score?.away ?? null,
+    home_score: (reg?.home ?? ft?.home) ?? null,
+    away_score: (reg?.away ?? ft?.away) ?? null,
     status: m.status,
     match_date: m.utcDate,
     group_name: m.group ? m.group.replace('GROUP_', '') : null,
+    // Этап турнира: GROUP_STAGE, LAST_16, QUARTER_FINALS, SEMI_FINALS, FINAL и т.д.
+    stage: m.stage || null,
+    // Чем закончился матч: REGULAR (основное время), EXTRA_TIME (доп.время), PENALTY_SHOOTOUT (пенальти)
+    duration: m.score?.duration || null,
   };
 }
 
