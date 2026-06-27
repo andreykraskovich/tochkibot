@@ -59,6 +59,34 @@ function resultSuffix(m) {
 // счёт 90 минут (в плей-офф regularTime), так что в плей-офф ничья в основное время
 // даёт исход DRAW, даже если затем были доп.время/пенальти.
 
+// У Telegram лимит 4096 символов на сообщение. Разбиваем длинный текст по строкам,
+// чтобы команды со списками (например /mypredicts у игрока с десятками прогнозов)
+// не упирались в лимит.
+function splitMessage(text, limit = 4000) {
+  if (text.length <= limit) return [text];
+  const parts = [];
+  let chunk = '';
+  for (const line of text.split('\n')) {
+    if (chunk.length + line.length + 1 > limit) {
+      if (chunk) parts.push(chunk);
+      chunk = '';
+      if (line.length > limit) { // одна строка длиннее лимита — режем жёстко
+        for (let i = 0; i < line.length; i += limit) parts.push(line.slice(i, i + limit));
+        continue;
+      }
+    }
+    chunk += (chunk ? '\n' : '') + line;
+  }
+  if (chunk) parts.push(chunk);
+  return parts;
+}
+
+async function replyLong(ctx, text, extra) {
+  for (const part of splitMessage(text)) {
+    await ctx.reply(part, extra);
+  }
+}
+
 // =====================
 // SYNC матчей из API
 // =====================
@@ -127,7 +155,7 @@ bot.command('today', async (ctx) => {
     }
     msg += '\n';
   }
-  ctx.reply(msg, { parse_mode: 'Markdown' });
+  await replyLong(ctx, msg, { parse_mode: 'Markdown' });
 });
 
 // Ближайшие матчи
@@ -140,7 +168,7 @@ bot.command('upcoming', async (ctx) => {
     const tag = matchTag(m);
     msg += `${formatDate(m.match_date)}${tag}\n*${m.home_team}* vs *${m.away_team}*\n\n`;
   }
-  ctx.reply(msg, { parse_mode: 'Markdown' });
+  await replyLong(ctx, msg, { parse_mode: 'Markdown' });
 });
 
 // Результаты завершённых матчей
@@ -153,7 +181,7 @@ bot.command('results', async (ctx) => {
     const tag = matchTag(m);
     msg += `${tag} *${m.home_team}* ${m.home_score}–${m.away_score}${resultSuffix(m)} *${m.away_team}*\n`;
   }
-  ctx.reply(msg, { parse_mode: 'Markdown' });
+  await replyLong(ctx, msg, { parse_mode: 'Markdown' });
 });
 
 // Мои прогнозы
@@ -180,7 +208,7 @@ bot.command('mypredicts', async (ctx) => {
   const correct = rows.filter(r => r.points > 0).length;
   msg += `Итого: *${total} очков* (${correct}/${rows.length} угаданных)`;
 
-  ctx.reply(msg, { parse_mode: 'Markdown' });
+  await replyLong(ctx, msg, { parse_mode: 'Markdown' });
 });
 
 // Таблица прогнозистов
@@ -194,7 +222,7 @@ bot.command('leaderboard', async (ctx) => {
     const medal = medals[i] || `${i + 1}.`;
     msg += `${medal} *${r.username || 'Аноним'}* — ${r.total_points} очков (${r.correct}/${r.total_predictions} угаданных)\n`;
   });
-  ctx.reply(msg, { parse_mode: 'Markdown' });
+  await replyLong(ctx, msg, { parse_mode: 'Markdown' });
 });
 
 // Сделать прогноз — показывает ближайшие матчи с кнопками
@@ -280,7 +308,9 @@ async function sendDailySchedule() {
   }
   msg += 'Используй /predict чтобы сделать прогноз!';
 
-  await bot.telegram.sendMessage(CHAT_ID, msg, { parse_mode: 'Markdown' });
+  for (const part of splitMessage(msg)) {
+    await bot.telegram.sendMessage(CHAT_ID, part, { parse_mode: 'Markdown' });
+  }
 }
 
 // =====================
