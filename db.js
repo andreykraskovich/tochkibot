@@ -55,6 +55,8 @@ async function upsertMatch(match) {
     INSERT INTO matches (id, home_team, away_team, home_score, away_score, status, match_date, group_name, stage, duration, updated_at)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
     ON CONFLICT (id) DO UPDATE SET
+      home_team = EXCLUDED.home_team,
+      away_team = EXCLUDED.away_team,
       home_score = EXCLUDED.home_score,
       away_score = EXCLUDED.away_score,
       status = EXCLUDED.status,
@@ -82,6 +84,7 @@ async function getUpcomingMatches(limit = 5) {
   const { rows } = await pool.query(`
     SELECT * FROM matches
     WHERE status IN ('SCHEDULED', 'TIMED') AND match_date > NOW() - INTERVAL '30 minutes'
+      AND home_team <> 'TBD' AND away_team <> 'TBD'
     ORDER BY match_date ASC
     LIMIT $1
   `, [limit]);
@@ -104,6 +107,19 @@ async function savePrediction(matchId, userId, username, prediction) {
       prediction = EXCLUDED.prediction,
       username = EXCLUDED.username
   `, [matchId, userId, username, prediction]);
+}
+
+// Удаляем прогнозы на матчи, где соперник ещё не определён (одна из сторон — TBD).
+// В плей-офф можно было «вслепую» прогнозировать на пару с неизвестной командой;
+// такие прогнозы нужно убрать. Запускается на каждом sync, пока команда ещё TBD.
+async function deleteTbdPredictions() {
+  const { rowCount } = await pool.query(`
+    DELETE FROM predictions
+    WHERE match_id IN (
+      SELECT id FROM matches WHERE home_team = 'TBD' OR away_team = 'TBD'
+    )
+  `);
+  return rowCount;
 }
 
 async function getPredictionsForMatch(matchId) {
@@ -168,5 +184,6 @@ init().catch(console.error);
 module.exports = {
   upsertMatch, getMatchById, getTodayMatches, getUpcomingMatches, getFinishedMatches,
   savePrediction, getPredictionsForMatch, getUserPrediction, getUserPredictions, awardPoints, getLeaderboard,
+  deleteTbdPredictions,
   isMatchNotified, markMatchNotified
 };

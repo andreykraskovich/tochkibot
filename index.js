@@ -98,6 +98,12 @@ async function syncMatches() {
       console.error('No matches in API response:', JSON.stringify(data).slice(0, 200));
       return 0;
     }
+
+    // Сначала чистим «слепые» прогнозы на пары с неопределённым соперником (TBD),
+    // пока имена команд в базе ещё TBD — следующий upsert уже подставит реальные.
+    const removed = await db.deleteTbdPredictions();
+    if (removed) console.log(`Removed ${removed} TBD predictions`);
+
     for (const m of data.matches) {
       const parsed = footballApi.parseMatch(m);
       await db.upsertMatch(parsed);
@@ -264,6 +270,7 @@ bot.action(/^pred_(\d+)_(HOME|DRAW|AWAY)$/, async (ctx) => {
 
   const match = await db.getMatchById(matchId);
   if (!match) return ctx.answerCbQuery('Матч не найден.');
+  if (match.home_team === 'TBD' || match.away_team === 'TBD') return ctx.answerCbQuery('⛔ Соперник ещё не определён — прогноз пока недоступен.');
   if (['FINISHED', 'IN_PLAY', 'PAUSED', 'SUSPENDED'].includes(match.status)) return ctx.answerCbQuery('⛔ Прогнозы на этот матч уже закрыты.');
 
   const username = ctx.from.username || ctx.from.first_name || 'Аноним';
